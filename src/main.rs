@@ -205,11 +205,37 @@ impl Hittable for Triangle {
 }
 
 // -------------------------
-// Quad helper function
+// New quad helper: build a square quad from center, normal, half_size
 // -------------------------
-// Given four vertices (in order), returns two triangles.
-// The vertices should be ordered so that the computed normal points
-// in the desired direction.
+fn quad_from_center(
+    center: Vector3<f32>,
+    normal: Vector3<f32>,
+    half_size: f32,
+    color: Vector3<f32>,
+) -> Vec<Box<dyn Hittable>> {
+    // Build an orthonormal basis.
+    let arbitrary = if normal.x.abs() > 0.9 {
+        Vector3::new(0.0, 1.0, 0.0)
+    } else {
+        Vector3::new(1.0, 0.0, 0.0)
+    };
+    // Compute tangent and bitangent.
+    // Here we want T and B such that the computed normal (via cross product of (v1-v0) and (v2-v0)) equals the given normal.
+    let tangent = normal.cross(&arbitrary).normalize(); // T = normal × arbitrary
+    let bitangent = tangent.cross(&normal).normalize(); // B = T × normal
+                                                        // Use the following ordering so that the first triangle (v0,v1,v2) gives:
+                                                        // v0 = center – T*half_size – B*half_size
+                                                        // v1 = center – T*half_size + B*half_size
+                                                        // v2 = center + T*half_size + B*half_size
+                                                        // v3 = center + T*half_size – B*half_size
+    let v0 = center - tangent * half_size - bitangent * half_size;
+    let v1 = center - tangent * half_size + bitangent * half_size;
+    let v2 = center + tangent * half_size + bitangent * half_size;
+    let v3 = center + tangent * half_size - bitangent * half_size;
+    quad(v0, v1, v2, v3, color)
+}
+
+// Old quad helper.
 fn quad(
     v0: Vector3<f32>,
     v1: Vector3<f32>,
@@ -217,7 +243,6 @@ fn quad(
     v3: Vector3<f32>,
     color: Vector3<f32>,
 ) -> Vec<Box<dyn Hittable>> {
-    // Two triangles: (v0, v1, v2) and (v0, v2, v3)
     vec![
         Box::new(Triangle { v0, v1, v2, color }),
         Box::new(Triangle {
@@ -345,6 +370,7 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>) -> LightSample {
     }
 }
 
+// Average direct samples for a single light.
 fn direct_light(
     hit: &HitRecord,
     light: &Light,
@@ -368,6 +394,20 @@ fn direct_light(
     }
     sum /= num_samples as f32;
     hit.color.component_mul(&sum) / std::f32::consts::PI
+}
+
+// Sum contributions from all lights.
+fn direct_light_all(
+    hit: &HitRecord,
+    lights: &[Light],
+    world: &dyn Hittable,
+    rng: &mut impl Rng,
+) -> Vector3<f32> {
+    let mut total = Vector3::zeros();
+    for light in lights {
+        total += direct_light(hit, light, world, rng);
+    }
+    total
 }
 
 fn in_shadow(ray: &Ray, t_max: f32, world: &dyn Hittable) -> bool {
@@ -396,7 +436,7 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
 fn radiance(
     ray: &Ray,
     world: &dyn Hittable,
-    light: &Light,
+    lights: &[Light],
     rng: &mut impl Rng,
     depth: u32,
 ) -> Vector3<f32> {
@@ -407,7 +447,7 @@ fn radiance(
         if DEBUG_NORMALS {
             return (hit.normal + Vector3::new(1.0, 1.0, 1.0)) * 0.5;
         }
-        let direct = direct_light(&hit, light, world, rng);
+        let direct = direct_light_all(&hit, lights, world, rng);
         let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
         let new_origin = hit.point + hit.normal * 0.001;
         let indirect = radiance(
@@ -416,7 +456,7 @@ fn radiance(
                 direction: new_dir,
             },
             world,
-            light,
+            lights,
             rng,
             depth - 1,
         );
@@ -432,22 +472,24 @@ fn radiance(
 fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
 
-    // Create floor quad.
+    // Create floor quad via our new helper.
     let floor_color = Vector3::new(0.9, 0.9, 0.9);
-    let floor_v0 = Vector3::new(-2.0, 0.0, -5.0);
-    let floor_v1 = Vector3::new(-2.0, 0.0, 0.0);
-    let floor_v2 = Vector3::new(2.0, 0.0, 0.0);
-    let floor_v3 = Vector3::new(2.0, 0.0, -5.0);
-    objects.extend(quad(floor_v0, floor_v1, floor_v2, floor_v3, floor_color));
+    // Floor center at (0,0,-2.5) with normal upward.
+    let floor_center = Vector3::new(0.0, 0.0, -2.5);
+    let floor_normal = Vector3::new(0.0, 1.0, 0.0);
+    objects.extend(quad_from_center(
+        floor_center,
+        floor_normal,
+        2.0,
+        floor_color,
+    ));
 
-    // Create back wall quad.
-    // Use the natural counterclockwise order so that the computed normal is (0,0,1).
+    // Create back wall quad via our helper.
     let wall_color = Vector3::new(0.9, 0.9, 0.9);
-    let wall_v0 = Vector3::new(-2.0, 0.0, -5.0);
-    let wall_v1 = Vector3::new(2.0, 0.0, -5.0);
-    let wall_v2 = Vector3::new(2.0, 2.0, -5.0);
-    let wall_v3 = Vector3::new(-2.0, 2.0, -5.0);
-    objects.extend(quad(wall_v0, wall_v1, wall_v2, wall_v3, wall_color));
+    // Back wall centered at (0,1,-5) with normal pointing toward the camera (0,0,1)
+    let wall_center = Vector3::new(0.0, 1.0, -5.0);
+    let wall_normal = Vector3::new(0.0, 0.0, 1.0);
+    objects.extend(quad_from_center(wall_center, wall_normal, 2.0, wall_color));
 
     // Diffuse sphere.
     let sphere_color = Vector3::new(0.8, 0.2, 0.2);
@@ -471,10 +513,25 @@ fn main() {
     let objects = reference_scene();
     let world = BVHNode::new(objects);
 
-    let light = Light {
-        position: Vector3::new(1.5, 1.5, -0.5),
-        intensity: Vector3::new(50.0, 50.0, 50.0),
-    };
+    // Create four lights of varying colors.
+    let lights = vec![
+        Light {
+            position: Vector3::new(1.5, 1.5, -0.5),
+            intensity: Vector3::new(50.0, 50.0, 50.0), // white
+        },
+        Light {
+            position: Vector3::new(-1.5, 1.5, -0.5),
+            intensity: Vector3::new(50.0, 10.0, 10.0), // reddish
+        },
+        Light {
+            position: Vector3::new(0.0, 1.5, 0.5),
+            intensity: Vector3::new(10.0, 50.0, 10.0), // greenish
+        },
+        Light {
+            position: Vector3::new(1.5, 2.5, -1.5),
+            intensity: Vector3::new(10.0, 10.0, 50.0), // bluish
+        },
+    ];
 
     let camera_pos = Vector3::new(0.0, 1.0, 1.0);
     let fov_deg: f32 = 45.0;
@@ -487,9 +544,6 @@ fn main() {
 
     for j in 0..height {
         for i in 0..width {
-            if j % 10 == 0 && i % 10 == 0 {
-                println!("height {} width {}", j, i);
-            }
             let mut pixel_color = Vector3::zeros();
             for _ in 0..samples_per_pixel {
                 let u = (i as f32 + rng.gen::<f32>()) / width as f32;
@@ -501,7 +555,7 @@ fn main() {
                     origin: camera_pos,
                     direction: ray_dir,
                 };
-                pixel_color += radiance(&ray, &world, &light, &mut rng, max_depth);
+                pixel_color += radiance(&ray, &world, &lights, &mut rng, max_depth);
             }
             pixel_color /= samples_per_pixel as f32;
             let gamma = 2.2;
