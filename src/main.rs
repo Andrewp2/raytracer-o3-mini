@@ -207,24 +207,25 @@ impl Hittable for Triangle {
 // -------------------------
 // New quad helper: build a square quad from center, normal, half_size
 // -------------------------
-// This helper automatically computes an orthonormal basis so that the
-// quad’s vertices are generated in counterclockwise order when viewed from the front.
+// This helper builds an orthonormal basis (T, B) from the given normal
+// and then defines corners as follows (counterclockwise when viewed from the front):
+//   v0 = center - T·half_size - B·half_size
+//   v1 = center - T·half_size + B·half_size
+//   v2 = center + T·half_size + B·half_size
+//   v3 = center + T·half_size - B·half_size
 fn quad_from_center(
     center: Vector3<f32>,
     normal: Vector3<f32>,
     half_size: f32,
     color: Vector3<f32>,
 ) -> Vec<Box<dyn Hittable>> {
-    // Choose an arbitrary vector not parallel to the normal.
     let arbitrary = if normal.x.abs() > 0.9 {
         Vector3::new(0.0, 1.0, 0.0)
     } else {
         Vector3::new(1.0, 0.0, 0.0)
     };
-    // Compute an orthonormal basis.
     let tangent = normal.cross(&arbitrary).normalize();
     let bitangent = tangent.cross(&normal).normalize();
-    // Define corners so that (v0,v1,v2) yields the given normal:
     let v0 = center - tangent * half_size - bitangent * half_size;
     let v1 = center - tangent * half_size + bitangent * half_size;
     let v2 = center + tangent * half_size + bitangent * half_size;
@@ -249,6 +250,60 @@ fn quad(
             color,
         }),
     ]
+}
+
+// -------------------------
+// Cube helper: build a cube from center and half_size
+// -------------------------
+fn cube_from_center(
+    center: Vector3<f32>,
+    half_size: f32,
+    color: Vector3<f32>,
+) -> Vec<Box<dyn Hittable>> {
+    let mut faces = Vec::new();
+    // Front face: normal (0,0,1)
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, 0.0, half_size),
+        Vector3::new(0.0, 0.0, 1.0),
+        half_size,
+        color,
+    ));
+    // Back face: normal (0,0,-1)
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, 0.0, -half_size),
+        Vector3::new(0.0, 0.0, -1.0),
+        half_size,
+        color,
+    ));
+    // Left face: normal (-1,0,0)
+    faces.extend(quad_from_center(
+        center + Vector3::new(-half_size, 0.0, 0.0),
+        Vector3::new(-1.0, 0.0, 0.0),
+        half_size,
+        color,
+    ));
+    // Right face: normal (1,0,0)
+    faces.extend(quad_from_center(
+        center + Vector3::new(half_size, 0.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+        half_size,
+        color,
+    ));
+    // Ceiling: normal (0,-1,0) [pointing inward]
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, half_size, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        half_size,
+        color,
+    ));
+    // Floor: normal (0,1,0) [pointing upward]
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, -half_size, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        half_size,
+        color,
+    ));
+    faces
 }
 
 // -------------------------
@@ -365,7 +420,7 @@ struct LightSample {
     pdf: f32,
 }
 
-// Sample a light source (either point or area) given a hit point.
+// Sample a light source (point or area) at a hit point.
 fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> LightSample {
     match light {
         Light::Point {
@@ -405,7 +460,7 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> 
             let direction = to_light / distance;
             let cos_theta = normal.dot(&(-direction)).max(0.0);
             let area = 4.0 * half_width * half_height;
-            // The effective radiant intensity from an area light is Lₑ * area.
+            // The effective radiant intensity is Lₑ * area.
             LightSample {
                 direction,
                 distance,
@@ -419,7 +474,6 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> 
 // -------------------------
 // Direct Illumination
 // -------------------------
-// We average a few samples per light and then sum contributions.
 fn direct_light(
     hit: &HitRecord,
     light: &Light,
@@ -442,7 +496,6 @@ fn direct_light(
         }
     }
     sum /= num_samples as f32;
-    // For Lambertian surfaces: reflected radiance = albedo/π * irradiance.
     hit.color.component_mul(&sum) / std::f32::consts::PI
 }
 
@@ -522,41 +575,118 @@ fn radiance(
 }
 
 // -------------------------
-// Reference Scene (Physically Realistic)
+// Cube helper: Build a cube from center and half_size.
+// Returns all six faces as separate Hittable objects.
+fn cube_from_center_2(
+    center: Vector3<f32>,
+    half_size: f32,
+    color: Vector3<f32>,
+) -> Vec<Box<dyn Hittable>> {
+    let mut faces = Vec::new();
+    // Front face: normal (0,0,1)
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, 0.0, half_size),
+        Vector3::new(0.0, 0.0, 1.0),
+        half_size,
+        color,
+    ));
+    // Back face: normal (0,0,-1)
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, 0.0, -half_size),
+        Vector3::new(0.0, 0.0, -1.0),
+        half_size,
+        color,
+    ));
+    // Left face: normal (-1,0,0)
+    faces.extend(quad_from_center(
+        center + Vector3::new(-half_size, 0.0, 0.0),
+        Vector3::new(-1.0, 0.0, 0.0),
+        half_size,
+        color,
+    ));
+    // Right face: normal (1,0,0)
+    faces.extend(quad_from_center(
+        center + Vector3::new(half_size, 0.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+        half_size,
+        color,
+    ));
+    // Ceiling: normal (0,-1,0) pointing inward.
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, half_size, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        half_size,
+        color,
+    ));
+    // Floor: normal (0,1,0) pointing upward.
+    faces.extend(quad_from_center(
+        center + Vector3::new(0.0, -half_size, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        half_size,
+        color,
+    ));
+    faces
+}
+
+// -------------------------
+// Reference Scene (Cornell Box)
 // -------------------------
 fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
 
-    // Floor quad: centered at (0,0,-2.5), normal upward, half-size 2.
-    let floor_color = Vector3::new(0.9, 0.9, 0.9);
-    let floor_center = Vector3::new(0.0, 0.0, -2.5);
-    let floor_normal = Vector3::new(0.0, 1.0, 0.0);
+    // Cornell box dimensions:
+    // Floor at y=0, ceiling at y=2, back wall at z=-3, left wall at x=-1, right wall at x=1.
+    // Use half-size = 1 for walls.
+
+    // Floor (white): center (0,0,-2), normal upward.
     objects.extend(quad_from_center(
-        floor_center,
-        floor_normal,
-        2.0,
-        floor_color,
+        Vector3::new(0.0, 0.0, -2.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        1.0,
+        Vector3::new(0.9, 0.9, 0.9),
+    ));
+    // Ceiling (white): center (0,2,-2), normal downward.
+    objects.extend(quad_from_center(
+        Vector3::new(0.0, 2.0, -2.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        1.0,
+        Vector3::new(0.9, 0.9, 0.9),
+    ));
+    // Back wall (white): center (0,1,-3), normal (0,0,1)
+    objects.extend(quad_from_center(
+        Vector3::new(0.0, 1.0, -3.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        1.0,
+        Vector3::new(0.9, 0.9, 0.9),
+    ));
+    // Left wall (red): center (-1,1,-2), normal (1,0,0) (points inward)
+    objects.extend(quad_from_center(
+        Vector3::new(-1.0, 1.0, -2.0),
+        Vector3::new(1.0, 0.0, 0.0),
+        1.0,
+        Vector3::new(0.8, 0.1, 0.1),
+    ));
+    // Right wall (green): center (1,1,-2), normal (-1,0,0) (points inward)
+    objects.extend(quad_from_center(
+        Vector3::new(1.0, 1.0, -2.0),
+        Vector3::new(-1.0, 0.0, 0.0),
+        1.0,
+        Vector3::new(0.1, 0.8, 0.1),
     ));
 
-    // Back wall quad: centered at (0,1,-5), normal pointing toward the camera (0,0,1), half-size 2.
-    let wall_color = Vector3::new(0.9, 0.9, 0.9);
-    let wall_center = Vector3::new(0.0, 1.0, -5.0);
-    let wall_normal = Vector3::new(0.0, 0.0, 1.0);
-    objects.extend(quad_from_center(wall_center, wall_normal, 2.0, wall_color));
-
-    // Diffuse sphere.
-    let sphere_color = Vector3::new(0.8, 0.2, 0.2);
-    objects.push(Box::new(Sphere {
-        center: Vector3::new(0.0, 0.5, -3.0),
-        radius: 0.5,
-        color: sphere_color,
-    }));
+    // Optionally, add a cube inside the box.
+    // Let's add a cube of side length 0.6 (half_size = 0.3) at center (0.3, 0.3, -2.3), colored white.
+    objects.extend(cube_from_center(
+        Vector3::new(0.3, 0.3, -2.3),
+        0.3,
+        Vector3::new(0.9, 0.9, 0.9),
+    ));
 
     objects
 }
 
 // -------------------------
-// Main
+// Main: Build scene, BVH, and render
 // -------------------------
 fn main() {
     let width = 800;
@@ -567,40 +697,29 @@ fn main() {
     let world = BVHNode::new(objects);
 
     // Define a collection of lights.
+    // We include several point lights and one area light.
     let lights = vec![
         Light::Point {
-            position: Vector3::new(1.5, 1.5, -0.5),
-            intensity: Vector3::new(5.0, 5.0, 5.0), // white point light
+            position: Vector3::new(0.0, 1.8, 0.0),
+            intensity: Vector3::new(5.0, 5.0, 5.0),
         },
-        Light::Point {
-            position: Vector3::new(-1.5, 1.5, -0.5),
-            intensity: Vector3::new(5.0, 1.0, 1.0), // reddish point light
-        },
-        Light::Point {
-            position: Vector3::new(0.0, 1.5, 0.5),
-            intensity: Vector3::new(1.0, 5.0, 1.0), // greenish point light
-        },
-        Light::Point {
-            position: Vector3::new(1.5, 2.5, -1.5),
-            intensity: Vector3::new(1.0, 1.0, 5.0), // bluish point light
-        },
-        // Add an area light.
+        // An area light on the ceiling:
         Light::Area {
-            center: Vector3::new(0.0, 2.0, -2.0),
-            normal: Vector3::new(0.0, -1.0, 0.0), // facing downward
-            half_width: 0.5,
-            half_height: 0.5,
-            intensity: Vector3::new(10.0, 10.0, 10.0), // radiance Lₑ in W/(m²·sr)
+            center: Vector3::new(0.0, 1.99, -2.0),
+            normal: Vector3::new(0.0, -1.0, 0.0),
+            half_width: 0.4,
+            half_height: 0.4,
+            intensity: Vector3::new(10.0, 10.0, 10.0),
         },
     ];
 
-    let camera_pos = Vector3::new(0.0, 1.0, 1.0);
-    let fov_deg: f32 = 45.0;
+    let camera_pos = Vector3::new(0.0, 1.0, 2.0);
+    let fov_deg: f32 = 40.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
     let aspect_ratio = width as f32 / height as f32;
 
     let mut rng = StdRng::from_entropy();
-    let samples_per_pixel = 256;
+    let samples_per_pixel = 16;
     let max_depth = 5;
 
     for j in 0..height {
