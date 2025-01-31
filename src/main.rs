@@ -1,12 +1,21 @@
 use image::{Rgb, RgbImage};
-use nalgebra::Vector3;
+use nalgebra::{Matrix4, Vector3, Vector4};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::fmt;
 use std::mem;
 
-const DEBUG_NORMALS: bool = false;
+const DEBUG_NORMALS: bool = true;
+const CUBE_ROTATION_DEGREES: f32 = 20.0;
+
+// Helper functions to convert a point or vector into a homogeneous Vector4.
+fn point_to_vec4(p: &Vector3<f32>) -> Vector4<f32> {
+    Vector4::new(p.x, p.y, p.z, 1.0)
+}
+fn vector_to_vec4(v: &Vector3<f32>) -> Vector4<f32> {
+    Vector4::new(v.x, v.y, v.z, 0.0)
+}
 
 // -------------------------
 // Ray and HitRecord types
@@ -22,7 +31,7 @@ struct HitRecord {
     t: f32,
     point: Vector3<f32>,
     normal: Vector3<f32>,
-    color: Vector3<f32>, // diffuse albedo (0-1)
+    color: Vector3<f32>, // diffuse albedo (0–1)
 }
 
 // -------------------------
@@ -134,7 +143,6 @@ impl Hittable for Sphere {
             color: self.color,
         })
     }
-
     fn bounding_box(&self) -> Option<AABB> {
         let r_vec = Vector3::new(self.radius, self.radius, self.radius);
         Some(AABB {
@@ -189,7 +197,6 @@ impl Hittable for Triangle {
             color: self.color,
         })
     }
-
     fn bounding_box(&self) -> Option<AABB> {
         let min_x = self.v0.x.min(self.v1.x).min(self.v2.x);
         let min_y = self.v0.y.min(self.v1.y).min(self.v2.y);
@@ -248,57 +255,136 @@ fn quad(
 }
 
 // -------------------------
-// Cube helper: Build a cube from center and half_size.
-// Returns all six faces.
-fn cube_from_center(
-    center: Vector3<f32>,
-    half_size: f32,
-    color: Vector3<f32>,
-) -> Vec<Box<dyn Hittable>> {
+// New cube helper: Build a cube with its center at the origin.
+// -------------------------
+fn cube_from_origin(half_size: f32, color: Vector3<f32>) -> Vec<Box<dyn Hittable>> {
     let mut faces = Vec::new();
     // Front face: normal (0,0,1)
     faces.extend(quad_from_center(
-        center + Vector3::new(0.0, 0.0, half_size),
+        Vector3::new(0.0, 0.0, half_size),
         Vector3::new(0.0, 0.0, 1.0),
         half_size,
         color,
     ));
     // Back face: normal (0,0,-1)
     faces.extend(quad_from_center(
-        center + Vector3::new(0.0, 0.0, -half_size),
+        Vector3::new(0.0, 0.0, -half_size),
         Vector3::new(0.0, 0.0, -1.0),
         half_size,
         color,
     ));
     // Left face: normal (-1,0,0)
     faces.extend(quad_from_center(
-        center + Vector3::new(-half_size, 0.0, 0.0),
+        Vector3::new(-half_size, 0.0, 0.0),
         Vector3::new(-1.0, 0.0, 0.0),
         half_size,
         color,
     ));
     // Right face: normal (1,0,0)
     faces.extend(quad_from_center(
-        center + Vector3::new(half_size, 0.0, 0.0),
+        Vector3::new(half_size, 0.0, 0.0),
         Vector3::new(1.0, 0.0, 0.0),
         half_size,
         color,
     ));
-    // Ceiling: normal (0,-1,0) pointing inward.
+    // Ceiling: normal (0,-1,0) [points inward]
     faces.extend(quad_from_center(
-        center + Vector3::new(0.0, half_size, 0.0),
+        Vector3::new(0.0, half_size, 0.0),
         Vector3::new(0.0, -1.0, 0.0),
         half_size,
         color,
     ));
-    // Floor: normal (0,1,0) pointing upward.
+    // Floor: normal (0,1,0)
     faces.extend(quad_from_center(
-        center + Vector3::new(0.0, -half_size, 0.0),
+        Vector3::new(0.0, -half_size, 0.0),
         Vector3::new(0.0, 1.0, 0.0),
         half_size,
         color,
     ));
     faces
+}
+
+// -------------------------
+// Transform struct and implementation
+// -------------------------
+#[derive(Clone)]
+struct Transform {
+    object: Box<dyn Hittable>,
+    transform: Matrix4<f32>,
+    inv_transform: Matrix4<f32>,
+}
+
+impl Transform {
+    fn new(object: Box<dyn Hittable>, transform: Matrix4<f32>) -> Self {
+        let inv_transform = transform
+            .try_inverse()
+            .expect("Transform matrix not invertible");
+        Transform {
+            object,
+            transform,
+            inv_transform,
+        }
+    }
+}
+
+impl Hittable for Transform {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<HitRecord> {
+        // Transform ray into object (local) space.
+        let local_origin_h = self.inv_transform * point_to_vec4(&ray.origin);
+        let local_origin =
+            Vector3::new(local_origin_h.x, local_origin_h.y, local_origin_h.z) / local_origin_h.w;
+        let local_direction_h = self.inv_transform * vector_to_vec4(&ray.direction);
+        let local_direction = Vector3::new(
+            local_direction_h.x,
+            local_direction_h.y,
+            local_direction_h.z,
+        );
+        let local_ray = Ray {
+            origin: local_origin,
+            direction: local_direction.normalize(),
+        };
+
+        if let Some(mut rec) = self.object.hit(&local_ray, t_min, t_max) {
+            // Transform hit point back to world space.
+            let world_hit_h = self.transform * point_to_vec4(&rec.point);
+            rec.point = Vector3::new(world_hit_h.x, world_hit_h.y, world_hit_h.z) / world_hit_h.w;
+            // Transform normal by the inverse-transpose.
+            let normal_h = self.inv_transform.transpose() * vector_to_vec4(&rec.normal);
+            rec.normal = Vector3::new(normal_h.x, normal_h.y, normal_h.z).normalize();
+            Some(rec)
+        } else {
+            None
+        }
+    }
+    fn bounding_box(&self) -> Option<AABB> {
+        if let Some(b) = self.object.bounding_box() {
+            let mut corners = Vec::new();
+            for &x in &[b.min.x, b.max.x] {
+                for &y in &[b.min.y, b.max.y] {
+                    for &z in &[b.min.z, b.max.z] {
+                        let p = Vector3::new(x, y, z);
+                        let p_world_h = self.transform * point_to_vec4(&p);
+                        let p_world =
+                            Vector3::new(p_world_h.x, p_world_h.y, p_world_h.z) / p_world_h.w;
+                        corners.push(p_world);
+                    }
+                }
+            }
+            let mut min = corners[0];
+            let mut max = corners[0];
+            for p in &corners[1..] {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+                max.z = max.z.max(p.z);
+            }
+            Some(AABB { min, max })
+        } else {
+            None
+        }
+    }
 }
 
 // -------------------------
@@ -383,7 +469,6 @@ impl Hittable for BVHNode {
         let right_hit = self.right.hit(ray, t_min, new_t_max);
         right_hit.or(left_hit)
     }
-
     fn bounding_box(&self) -> Option<AABB> {
         Some(self.bbox.clone())
     }
@@ -392,18 +477,17 @@ impl Hittable for BVHNode {
 // -------------------------
 // Light
 // -------------------------
-// Supports two kinds of lights: Point and Area.
 enum Light {
     Point {
         position: Vector3<f32>,
-        intensity: Vector3<f32>, // radiant intensity in W/sr
+        intensity: Vector3<f32>,
     },
     Area {
         center: Vector3<f32>,
         normal: Vector3<f32>,
         half_width: f32,
         half_height: f32,
-        intensity: Vector3<f32>, // radiance in W/(m²·sr)
+        intensity: Vector3<f32>,
     },
 }
 
@@ -411,11 +495,10 @@ enum Light {
 struct LightSample {
     direction: Vector3<f32>,
     distance: f32,
-    intensity: Vector3<f32>, // already scaled by area for area lights
+    intensity: Vector3<f32>,
     pdf: f32,
 }
 
-// Sample a light (point or area) at a hit point.
 fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> LightSample {
     match light {
         Light::Point {
@@ -464,7 +547,7 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> 
 }
 
 // -------------------------
-// Direct Illumination
+// Direct Illumination and Shadowing
 // -------------------------
 fn direct_light(
     hit: &HitRecord,
@@ -519,15 +602,14 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
     let x = r * phi.cos();
     let y = r * phi.sin();
     let z = (1.0 - r1).sqrt();
-    let w = *normal;
-    let a = if w.x.abs() > 0.9 {
+    let a = if normal.x.abs() > 0.9 {
         Vector3::new(0.0, 1.0, 0.0)
     } else {
         Vector3::new(1.0, 0.0, 0.0)
     };
-    let v = w.cross(&a).normalize();
-    let u = w.cross(&v);
-    u * x + v * y + w * z
+    let v = normal.cross(&a).normalize();
+    let u = normal.cross(&v);
+    u * x + v * y + *normal * z
 }
 
 // -------------------------
@@ -547,10 +629,7 @@ fn radiance(
         if DEBUG_NORMALS {
             return (hit.normal + Vector3::new(1.0, 1.0, 1.0)) * 0.5;
         }
-        // Compute direct illumination.
         let direct = direct_light_all(&hit, lights, world, rng);
-
-        // Russian roulette for indirect bounce.
         let mut indirect = Vector3::zeros();
         let min_depth = 3;
         if depth > min_depth {
@@ -589,82 +668,78 @@ fn radiance(
                 depth - 1,
             );
         }
-        return direct + hit.color.component_mul(&indirect);
+        direct + hit.color.component_mul(&indirect)
     } else {
-        return Vector3::new(0.02, 0.02, 0.02);
+        Vector3::new(0.02, 0.02, 0.02)
     }
 }
 
 // -------------------------
-// Reference Scene (Cornell Box)
+// Reference Scene (Cornell Box) with Hierarchy
 // -------------------------
 fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
-
-    // Cornell box dimensions:
-    // Floor at y=0, ceiling at y=2, back wall at z=-3, left wall at x=-1, right wall at x=1.
-    // Use half-size = 1 for walls.
-
-    // Floor (white): center (0,0,-2), normal upward.
+    // Floor (white)
     objects.extend(quad_from_center(
         Vector3::new(0.0, 0.0, -2.0),
         Vector3::new(0.0, 1.0, 0.0),
         1.0,
         Vector3::new(0.9, 0.9, 0.9),
     ));
-    // Ceiling (white): center (0,2,-2), normal downward.
+    // Ceiling (white)
     objects.extend(quad_from_center(
         Vector3::new(0.0, 2.0, -2.0),
         Vector3::new(0.0, -1.0, 0.0),
         1.0,
         Vector3::new(0.9, 0.9, 0.9),
     ));
-    // Back wall (white): center (0,1,-3), normal (0,0,1)
+    // Back wall (white)
     objects.extend(quad_from_center(
         Vector3::new(0.0, 1.0, -3.0),
         Vector3::new(0.0, 0.0, 1.0),
         1.0,
         Vector3::new(0.9, 0.9, 0.9),
     ));
-    // Left wall (red): center (-1,1,-2), normal (1,0,0) (points inward)
+    // Left wall (red)
     objects.extend(quad_from_center(
         Vector3::new(-1.0, 1.0, -2.0),
         Vector3::new(1.0, 0.0, 0.0),
         1.0,
         Vector3::new(0.8, 0.1, 0.1),
     ));
-    // Right wall (green): center (1,1,-2), normal (-1,0,0) (points inward)
+    // Right wall (green)
     objects.extend(quad_from_center(
         Vector3::new(1.0, 1.0, -2.0),
         Vector3::new(-1.0, 0.0, 0.0),
         1.0,
         Vector3::new(0.1, 0.8, 0.1),
     ));
-
-    // Add a cube inside the box.
-    // Cube of side length 0.6 (half_size = 0.3) at center (0.3, 0.3, -2.3), colored white.
-    objects.extend(cube_from_center(
-        Vector3::new(0.3, 0.3, -2.3),
-        0.3,
-        Vector3::new(0.9, 0.9, 0.9),
-    ));
-
+    // Build a cube with its center at the origin.
+    let cube_faces = cube_from_origin(0.3, Vector3::new(0.9, 0.9, 0.9));
+    // Create a rotation matrix (rotate about Y by 20°)
+    let rotation =
+        Matrix4::new_rotation(Vector3::new(0.0, CUBE_ROTATION_DEGREES.to_radians(), 0.0));
+    // Create a translation matrix to place the cube at (0.3, 0.3, -2.3)
+    let translation = Matrix4::new_translation(&Vector3::new(0.3, 0.3, -2.3));
+    // Compose: rotate first, then translate.
+    let transform = translation * rotation;
+    // Wrap each face in a Transform so that the cube rotates about its own center and is moved.
+    let transformed_cube: Vec<Box<dyn Hittable>> = cube_faces
+        .into_iter()
+        .map(|h| Box::new(Transform::new(h, transform)) as Box<dyn Hittable>)
+        .collect();
+    objects.extend(transformed_cube);
     objects
 }
 
 // -------------------------
-// Main: Build scene, BVH, and render (with Rayon multi-threading)
+// Main: Build scene, BVH, and render (using Rayon)
 // -------------------------
 fn main() {
     let width = 800;
     let height = 600;
-
-    // Prepare the scene.
     let objects = reference_scene();
     let world = BVHNode::new(objects);
-
-    // Define lights:
-    // Existing point light and area light, plus two additional point lights of different colors.
     let lights = vec![
         Light::Point {
             position: Vector3::new(0.0, 1.8, 0.0),
@@ -686,15 +761,12 @@ fn main() {
             intensity: Vector3::new(0.3, 0.3, 1.0),
         },
     ];
-
     let camera_pos = Vector3::new(0.0, 1.0, 2.0);
     let fov_deg: f32 = 40.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
     let aspect_ratio = width as f32 / height as f32;
-
-    let num_samples_per_pixel = 256;
-    let num_bounces = 5;
-
+    let num_samples_per_pixel = 128;
+    let num_bounces = 4;
     let pixel_data: Vec<u8> = (0..(width * height))
         .into_par_iter()
         .map_init(
@@ -725,7 +797,6 @@ fn main() {
         )
         .flatten()
         .collect();
-
     let img = RgbImage::from_raw(width as u32, height as u32, pixel_data).unwrap();
     img.save("output.png").unwrap();
 }
