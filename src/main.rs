@@ -94,8 +94,6 @@ impl<T> Reservoir<T> {
         }
     }
     /// Updates the reservoir with a new candidate sample.
-    /// This follows the reservoir sampling update: for each candidate with weight w,
-    /// with probability w/(w_sum + w) the candidate replaces the current sample.
     fn update(&mut self, sample: T, weight: f32, rng: &mut impl Rng) {
         self.M += 1;
         self.w_sum += weight;
@@ -106,8 +104,6 @@ impl<T> Reservoir<T> {
 }
 
 /// Checks if the light sample is occluded by any sphere.
-/// The ray is cast from hit_point (offset by a small epsilon along the normal)
-/// toward the light. If any intersection occurs before reaching the light, the sample is occluded.
 fn in_shadow(
     hit_point: &Vector3<f32>,
     normal: &Vector3<f32>,
@@ -130,8 +126,7 @@ fn in_shadow(
     false
 }
 
-/// Traces a ray through the scene and, if a sphere is hit, returns:
-/// (distance, hit point, surface normal, sphere color).
+/// Traces a ray through the scene. Returns (distance, hit point, surface normal, sphere color).
 fn trace_ray(ray: &Ray, scene: &Scene) -> Option<(f32, Vector3<f32>, Vector3<f32>, Vector3<f32>)> {
     let mut closest = std::f32::MAX;
     let mut hit_color = Vector3::zeros();
@@ -157,9 +152,6 @@ fn trace_ray(ray: &Ray, scene: &Scene) -> Option<(f32, Vector3<f32>, Vector3<f32
 }
 
 /// Shades the hit point using reservoir-based importance sampling.
-/// For a number of candidate light samples, we update a reservoir based on the sample weight,
-/// and then use the chosen candidate to compute the final contribution.
-/// Here the weight is computed (for diffuse surfaces) as cosθ/distance².
 fn shade(
     hit_point: &Vector3<f32>,
     normal: &Vector3<f32>,
@@ -187,8 +179,6 @@ fn shade(
             return Vector3::zeros();
         }
         let cos_theta = normal.dot(&sample.direction).max(0.0);
-        // For Lambertian diffuse, the contribution is (light intensity * cosθ / distance²).
-        // Multiplying by the surface color and dividing by pi (BRDF normalization) gives the final value.
         let contribution = sample.intensity * cos_theta / (sample.distance * sample.distance);
         return color.component_mul(&contribution) / std::f32::consts::PI;
     }
@@ -200,68 +190,100 @@ fn main() {
     let height = 600;
     let mut img = RgbImage::new(width, height);
 
-    // Define a simple scene: three spheres and one point light.
+    // Build a more complex scene:
+    // - A large floor (a huge sphere)
+    // - Multiple colored spheres scattered around
     let scene = Scene {
         spheres: vec![
+            // Floor
             Sphere {
-                center: Vector3::new(0.0, -0.5, -3.0),
+                center: Vector3::new(0.0, -1000.5, -3.0),
+                radius: 1000.0,
+                color: Vector3::new(0.8, 0.8, 0.8),
+            },
+            // Main spheres
+            Sphere {
+                center: Vector3::new(0.0, 0.0, -3.0),
                 radius: 0.5,
                 color: Vector3::new(0.7, 0.3, 0.3),
             },
             Sphere {
-                center: Vector3::new(1.0, 0.0, -4.0),
+                center: Vector3::new(1.0, -0.2, -4.0),
                 radius: 0.5,
                 color: Vector3::new(0.3, 0.7, 0.3),
             },
             Sphere {
-                center: Vector3::new(-1.0, 0.0, -4.0),
+                center: Vector3::new(-1.0, 0.1, -4.0),
                 radius: 0.5,
                 color: Vector3::new(0.3, 0.3, 0.7),
             },
+            // Extra detail
+            Sphere {
+                center: Vector3::new(-0.5, -0.3, -2.5),
+                radius: 0.3,
+                color: Vector3::new(0.8, 0.6, 0.2),
+            },
+            Sphere {
+                center: Vector3::new(0.7, 0.2, -2.8),
+                radius: 0.3,
+                color: Vector3::new(0.2, 0.8, 0.8),
+            },
         ],
         light: Light {
-            position: Vector3::new(5.0, 5.0, -2.0),
+            position: Vector3::new(5.0, 7.0, -2.0),
             intensity: Vector3::new(10.0, 10.0, 10.0),
         },
     };
 
-    // Simple pinhole camera setup.
+    // Pinhole camera setup.
     let camera_pos = Vector3::new(0.0, 0.0, 0.0);
     let fov_deg: f32 = 90.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
     let aspect_ratio = width as f32 / height as f32;
 
     let mut rng = StdRng::from_entropy();
+    let samples_per_pixel = 16;
 
-    // For each pixel, generate a ray and compute the color.
+    // Render loop with anti-aliasing.
     for j in 0..height {
         for i in 0..width {
-            // Convert pixel coordinate to normalized device coordinate.
-            let x = (2.0 * ((i as f32 + 0.5) / width as f32) - 1.0) * aspect_ratio * scale;
-            let y = (1.0 - 2.0 * ((j as f32 + 0.5) / height as f32)) * scale;
-            let ray_dir = Vector3::new(x, y, -1.0).normalize();
-            let ray = Ray {
-                origin: camera_pos,
-                direction: ray_dir,
-            };
+            let mut pixel_color = Vector3::zeros();
 
-            let pixel_color =
-                if let Some((_t, hit_point, normal, hit_color)) = trace_ray(&ray, &scene) {
-                    shade(&hit_point, &normal, &hit_color, &scene, &mut rng)
-                } else {
-                    // Background color.
-                    Vector3::new(0.2, 0.2, 0.2)
+            // Supersampling loop.
+            for _ in 0..samples_per_pixel {
+                // Jitter within the pixel.
+                let u = (i as f32 + rng.gen::<f32>()) / width as f32;
+                let v = (j as f32 + rng.gen::<f32>()) / height as f32;
+                let x = (2.0 * u - 1.0) * aspect_ratio * scale;
+                let y = (1.0 - 2.0 * v) * scale;
+                let ray_dir = Vector3::new(x, y, -1.0).normalize();
+                let ray = Ray {
+                    origin: camera_pos,
+                    direction: ray_dir,
                 };
 
-            // Gamma correction (gamma = 2.2).
+                let sample_color =
+                    if let Some((_t, hit_point, normal, hit_color)) = trace_ray(&ray, &scene) {
+                        shade(&hit_point, &normal, &hit_color, &scene, &mut rng)
+                    } else {
+                        // Background color.
+                        Vector3::new(0.2, 0.2, 0.2)
+                    };
+                pixel_color += sample_color;
+            }
+            // Average the samples.
+            pixel_color /= samples_per_pixel as f32;
+
+            // Gamma correction.
             let gamma = 2.2;
             let r = pixel_color.x.max(0.0).min(1.0).powf(1.0 / gamma);
             let g = pixel_color.y.max(0.0).min(1.0).powf(1.0 / gamma);
             let b = pixel_color.z.max(0.0).min(1.0).powf(1.0 / gamma);
-            let ir = (r * 255.0) as u8;
-            let ig = (g * 255.0) as u8;
-            let ib = (b * 255.0) as u8;
-            img.put_pixel(i, j, Rgb([ir, ig, ib]));
+            img.put_pixel(
+                i,
+                j,
+                Rgb([(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]),
+            );
         }
     }
 
