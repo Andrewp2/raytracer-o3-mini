@@ -19,7 +19,7 @@ struct HitRecord {
     t: f32,
     point: Vector3<f32>,
     normal: Vector3<f32>,
-    color: Vector3<f32>,
+    color: Vector3<f32>, // diffuse reflectance (albedo), unitless (0-1)
 }
 
 // -------------------------
@@ -211,7 +211,7 @@ struct BVHNode {
     bbox: AABB,
 }
 
-// Custom Debug impl that only prints the bounding box.
+// Custom Debug impl that prints only the bounding box.
 impl fmt::Debug for BVHNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BVHNode").field("bbox", &self.bbox).finish()
@@ -223,8 +223,8 @@ impl BVHNode {
         // Choose a random axis (0 = x, 1 = y, 2 = z)
         let axis = rand::random::<usize>() % 3;
         objects.sort_by(|a, b| {
-            let box_a = a.bounding_box().expect("No bounding box in BVHNode::new");
-            let box_b = b.bounding_box().expect("No bounding box in BVHNode::new");
+            let box_a = a.bounding_box().expect("No bounding box");
+            let box_b = b.bounding_box().expect("No bounding box");
             box_a.min[axis]
                 .partial_cmp(&box_b.min[axis])
                 .unwrap_or(Ordering::Equal)
@@ -233,9 +233,7 @@ impl BVHNode {
         let n = objects.len();
         if n == 1 {
             let object = objects.remove(0);
-            let bbox = object
-                .bounding_box()
-                .expect("No bounding box in single object");
+            let bbox = object.bounding_box().expect("No bounding box");
             // Duplicate the object for both children.
             BVHNode {
                 left: object.clone_box(),
@@ -245,10 +243,8 @@ impl BVHNode {
         } else if n == 2 {
             let right = objects.pop().unwrap();
             let left = objects.pop().unwrap();
-            let box_left = left.bounding_box().expect("No bounding box in left object");
-            let box_right = right
-                .bounding_box()
-                .expect("No bounding box in right object");
+            let box_left = left.bounding_box().expect("No bounding box");
+            let box_right = right.bounding_box().expect("No bounding box");
             let bbox = surrounding_box(&box_left, &box_right);
             BVHNode { left, right, bbox }
         } else {
@@ -256,8 +252,8 @@ impl BVHNode {
             let right_vec = objects.split_off(mid);
             let left_node = BVHNode::new(objects);
             let right_node = BVHNode::new(right_vec);
-            let box_left = left_node.bounding_box().expect("No bbox in left BVHNode");
-            let box_right = right_node.bounding_box().expect("No bbox in right BVHNode");
+            let box_left = left_node.bounding_box().expect("No bbox");
+            let box_right = right_node.bounding_box().expect("No bbox");
             let bbox = surrounding_box(&box_left, &box_right);
             BVHNode {
                 left: Box::new(left_node),
@@ -303,7 +299,7 @@ impl Hittable for BVHNode {
 // -------------------------
 struct Light {
     position: Vector3<f32>,
-    intensity: Vector3<f32>,
+    intensity: Vector3<f32>, // Radiant intensity in W/sr
 }
 
 #[derive(Clone, Debug)]
@@ -385,10 +381,63 @@ fn shade(hit: &HitRecord, light: &Light, world: &dyn Hittable, rng: &mut impl Rn
         }
         let cos_theta = hit.normal.dot(&sample.direction).max(0.0);
         let contribution = sample.intensity * cos_theta / (sample.distance * sample.distance);
-        // Lambertian BRDF (divide by PI)
+        // Lambertian BRDF: reflectance/π
         return hit.color.component_mul(&contribution) / std::f32::consts::PI;
     }
     Vector3::zeros()
+}
+
+// -------------------------
+// Reference Scene (Physically Realistic)
+// -------------------------
+// All dimensions are in meters and light intensity in W/sr.
+// This scene consists of:
+//  • A floor (two triangles)
+//  • A back wall (two triangles)
+//  • A diffuse sphere (object)
+//  • A point light located above the sphere.
+fn reference_scene() -> Vec<Box<dyn Hittable>> {
+    let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
+
+    // Floor: a rectangle from (-2,0,-5) to (2,0,0)
+    let floor_color = Vector3::new(0.9, 0.9, 0.9);
+    objects.push(Box::new(Triangle {
+        v0: Vector3::new(-2.0, 0.0, -5.0),
+        v1: Vector3::new(2.0, 0.0, -5.0),
+        v2: Vector3::new(2.0, 0.0, 0.0),
+        color: floor_color,
+    }));
+    objects.push(Box::new(Triangle {
+        v0: Vector3::new(-2.0, 0.0, -5.0),
+        v1: Vector3::new(2.0, 0.0, 0.0),
+        v2: Vector3::new(-2.0, 0.0, 0.0),
+        color: floor_color,
+    }));
+
+    // Back wall: vertical plane at z = -5, from (-2,0,-5) to (2,2,-5)
+    let wall_color = Vector3::new(0.9, 0.9, 0.9);
+    objects.push(Box::new(Triangle {
+        v0: Vector3::new(-2.0, 0.0, -5.0),
+        v1: Vector3::new(2.0, 0.0, -5.0),
+        v2: Vector3::new(2.0, 2.0, -5.0),
+        color: wall_color,
+    }));
+    objects.push(Box::new(Triangle {
+        v0: Vector3::new(-2.0, 0.0, -5.0),
+        v1: Vector3::new(2.0, 2.0, -5.0),
+        v2: Vector3::new(-2.0, 2.0, -5.0),
+        color: wall_color,
+    }));
+
+    // Diffuse sphere: center (0,0.5,-3) with radius 0.5
+    let sphere_color = Vector3::new(0.8, 0.2, 0.2); // red-ish
+    objects.push(Box::new(Sphere {
+        center: Vector3::new(0.0, 0.5, -3.0),
+        radius: 0.5,
+        color: sphere_color,
+    }));
+
+    objects
 }
 
 // -------------------------
@@ -399,50 +448,21 @@ fn main() {
     let height = 600;
     let mut img = RgbImage::new(width, height);
 
-    // Build scene objects (spheres and triangles).
-    let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
-    // Floor as a large sphere.
-    objects.push(Box::new(Sphere {
-        center: Vector3::new(0.0, -1000.5, -3.0),
-        radius: 1000.0,
-        color: Vector3::new(0.8, 0.8, 0.8),
-    }));
-    // Spheres.
-    objects.push(Box::new(Sphere {
-        center: Vector3::new(0.0, 0.0, -3.0),
-        radius: 0.5,
-        color: Vector3::new(0.7, 0.3, 0.3),
-    }));
-    objects.push(Box::new(Sphere {
-        center: Vector3::new(1.0, -0.2, -4.0),
-        radius: 0.5,
-        color: Vector3::new(0.3, 0.7, 0.3),
-    }));
-    objects.push(Box::new(Sphere {
-        center: Vector3::new(-1.0, 0.1, -4.0),
-        radius: 0.5,
-        color: Vector3::new(0.3, 0.3, 0.7),
-    }));
-    // A triangle.
-    objects.push(Box::new(Triangle {
-        v0: Vector3::new(-0.5, 0.0, -2.0),
-        v1: Vector3::new(0.0, 0.5, -2.0),
-        v2: Vector3::new(0.5, 0.0, -2.0),
-        color: Vector3::new(0.8, 0.6, 0.2),
-    }));
-
-    // Build BVH from the objects.
+    // Use the reference scene with physically realistic geometry.
+    let objects = reference_scene();
     let world = BVHNode::new(objects);
 
     // Define a point light.
+    // In physical units: position in meters, intensity in W/sr.
     let light = Light {
-        position: Vector3::new(5.0, 7.0, -2.4),
-        intensity: Vector3::new(100.0, 100.0, 100.0),
+        position: Vector3::new(0.0, 1.8, -3.0),
+        intensity: Vector3::new(500.0, 500.0, 500.0), // e.g., a 500 W/sr source
     };
 
     // Camera parameters.
-    let camera_pos = Vector3::new(0.0, 0.0, 0.0);
-    let fov_deg: f32 = 90.0;
+    // Place camera so that it sees the reference scene.
+    let camera_pos = Vector3::new(0.0, 1.0, 1.0);
+    let fov_deg: f32 = 45.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
     let aspect_ratio = width as f32 / height as f32;
 
@@ -459,6 +479,8 @@ fn main() {
                 let v = (j as f32 + rng.gen::<f32>()) / height as f32;
                 let x = (2.0 * u - 1.0) * aspect_ratio * scale;
                 let y = (1.0 - 2.0 * v) * scale;
+                // Compute ray direction in camera space.
+                // Here we assume a simple pinhole camera looking toward -z.
                 let ray_dir = Vector3::new(x, y, -1.0).normalize();
                 let ray = Ray {
                     origin: camera_pos,
@@ -468,8 +490,8 @@ fn main() {
                     let sample_color = shade(&hit, &light, &world, &mut rng);
                     pixel_color += sample_color;
                 } else {
-                    // Background color.
-                    pixel_color += Vector3::new(0.2, 0.2, 0.2);
+                    // Background: use a low-level ambient radiance.
+                    pixel_color += Vector3::new(0.02, 0.02, 0.02);
                 }
             }
             pixel_color /= samples_per_pixel as f32;
