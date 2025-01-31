@@ -351,7 +351,7 @@ fn direct_light(
     world: &dyn Hittable,
     rng: &mut impl Rng,
 ) -> Vector3<f32> {
-    let num_samples = 16;
+    let num_samples = 2;
     let mut sum = Vector3::zeros();
     for _ in 0..num_samples {
         let ls = sample_light(light, &hit.point);
@@ -482,11 +482,14 @@ fn main() {
     let aspect_ratio = width as f32 / height as f32;
 
     let mut rng = StdRng::from_entropy();
-    let samples_per_pixel = 16;
+    let samples_per_pixel = 4;
     let max_depth = 3;
 
     for j in 0..height {
         for i in 0..width {
+            if j % 10 == 0 && i % 10 == 0 {
+                println!("height {} width {}", j, i);
+            }
             let mut pixel_color = Vector3::zeros();
             for _ in 0..samples_per_pixel {
                 let u = (i as f32 + rng.gen::<f32>()) / width as f32;
