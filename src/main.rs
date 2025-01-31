@@ -6,8 +6,9 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::mem;
 
-const DEBUG_NORMALS: bool = true;
+const DEBUG_NORMALS: bool = false;
 const CUBE_ROTATION_DEGREES: f32 = 20.0;
+const CLAMP_RADIANCE: f32 = 5.0; // Clamp each radiance sample to this maximum value
 
 // Helper functions to convert a point or vector into a homogeneous Vector4.
 fn point_to_vec4(p: &Vector3<f32>) -> Vector4<f32> {
@@ -15,6 +16,15 @@ fn point_to_vec4(p: &Vector3<f32>) -> Vector4<f32> {
 }
 fn vector_to_vec4(v: &Vector3<f32>) -> Vector4<f32> {
     Vector4::new(v.x, v.y, v.z, 0.0)
+}
+
+// A simple clamping function to reduce fireflies.
+fn clamp_radiance(color: Vector3<f32>, max_val: f32) -> Vector3<f32> {
+    Vector3::new(
+        color.x.min(max_val),
+        color.y.min(max_val),
+        color.z.min(max_val),
+    )
 }
 
 // -------------------------
@@ -555,7 +565,7 @@ fn direct_light(
     world: &dyn Hittable,
     rng: &mut impl Rng,
 ) -> Vector3<f32> {
-    let num_samples = 6;
+    let num_samples = 10;
     let mut sum = Vector3::zeros();
     for _ in 0..num_samples {
         let ls = sample_light(light, &hit.point, rng);
@@ -785,7 +795,9 @@ fn main() {
                         origin: camera_pos,
                         direction: ray_dir,
                     };
-                    pixel_color += radiance(&ray, &world, &lights, rng, num_bounces);
+                    // Clamp each radiance sample to reduce fireflies.
+                    let sample = radiance(&ray, &world, &lights, rng, num_bounces);
+                    pixel_color += clamp_radiance(sample, CLAMP_RADIANCE);
                 }
                 pixel_color /= num_samples_per_pixel as f32;
                 let gamma = 2.2;
