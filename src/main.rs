@@ -2,6 +2,7 @@ use image::{Rgb, RgbImage};
 use nalgebra::Vector3;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::cmp::Ordering;
+use std::fmt;
 use std::mem;
 
 // -------------------------
@@ -204,11 +205,17 @@ impl Hittable for Triangle {
 // -------------------------
 // BVH Node
 // -------------------------
-#[derive(Debug)]
 struct BVHNode {
     left: Box<dyn Hittable>,
     right: Box<dyn Hittable>,
     bbox: AABB,
+}
+
+// Custom Debug impl that only prints the bounding box.
+impl fmt::Debug for BVHNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BVHNode").field("bbox", &self.bbox).finish()
+    }
 }
 
 impl BVHNode {
@@ -268,12 +275,6 @@ impl Clone for BVHNode {
             right: self.right.clone_box(),
             bbox: self.bbox.clone(),
         }
-    }
-}
-
-impl HittableClone for BVHNode {
-    fn clone_box(&self) -> Box<dyn Hittable> {
-        Box::new(self.clone())
     }
 }
 
@@ -435,8 +436,8 @@ fn main() {
 
     // Define a point light.
     let light = Light {
-        position: Vector3::new(5.0, 7.0, -2.0),
-        intensity: Vector3::new(10.0, 10.0, 10.0),
+        position: Vector3::new(5.0, 7.0, -2.4),
+        intensity: Vector3::new(100.0, 100.0, 100.0),
     };
 
     // Camera parameters.
