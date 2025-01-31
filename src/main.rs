@@ -162,7 +162,7 @@ impl Hittable for Triangle {
         let h = ray.direction.cross(&edge2);
         let a = edge1.dot(&h);
         if a.abs() < epsilon {
-            return None; // Ray is parallel.
+            return None;
         }
         let f = 1.0 / a;
         let s = ray.origin - self.v0;
@@ -207,27 +207,24 @@ impl Hittable for Triangle {
 // -------------------------
 // New quad helper: build a square quad from center, normal, half_size
 // -------------------------
+// This helper automatically computes an orthonormal basis so that the
+// quad’s vertices are generated in counterclockwise order when viewed from the front.
 fn quad_from_center(
     center: Vector3<f32>,
     normal: Vector3<f32>,
     half_size: f32,
     color: Vector3<f32>,
 ) -> Vec<Box<dyn Hittable>> {
-    // Build an orthonormal basis.
+    // Choose an arbitrary vector not parallel to the normal.
     let arbitrary = if normal.x.abs() > 0.9 {
         Vector3::new(0.0, 1.0, 0.0)
     } else {
         Vector3::new(1.0, 0.0, 0.0)
     };
-    // Compute tangent and bitangent.
-    // Here we want T and B such that the computed normal (via cross product of (v1-v0) and (v2-v0)) equals the given normal.
-    let tangent = normal.cross(&arbitrary).normalize(); // T = normal × arbitrary
-    let bitangent = tangent.cross(&normal).normalize(); // B = T × normal
-                                                        // Use the following ordering so that the first triangle (v0,v1,v2) gives:
-                                                        // v0 = center – T*half_size – B*half_size
-                                                        // v1 = center – T*half_size + B*half_size
-                                                        // v2 = center + T*half_size + B*half_size
-                                                        // v3 = center + T*half_size – B*half_size
+    // Compute an orthonormal basis.
+    let tangent = normal.cross(&arbitrary).normalize();
+    let bitangent = tangent.cross(&normal).normalize();
+    // Define corners so that (v0,v1,v2) yields the given normal:
     let v0 = center - tangent * half_size - bitangent * half_size;
     let v1 = center - tangent * half_size + bitangent * half_size;
     let v2 = center + tangent * half_size + bitangent * half_size;
@@ -343,34 +340,86 @@ impl Hittable for BVHNode {
 }
 
 // -------------------------
-// Light, Direct Illumination, and Sampling
+// Light
 // -------------------------
-struct Light {
-    position: Vector3<f32>,
-    intensity: Vector3<f32>, // Radiant intensity in W/sr
+// Now we support two kinds of lights.
+enum Light {
+    Point {
+        position: Vector3<f32>,
+        intensity: Vector3<f32>, // radiant intensity in W/sr
+    },
+    Area {
+        center: Vector3<f32>,
+        normal: Vector3<f32>,
+        half_width: f32,
+        half_height: f32,
+        intensity: Vector3<f32>, // radiance in W/(m^2·sr)
+    },
 }
 
 #[derive(Clone, Debug)]
 struct LightSample {
     direction: Vector3<f32>,
     distance: f32,
-    intensity: Vector3<f32>,
+    intensity: Vector3<f32>, // already scaled by area for area lights
     pdf: f32,
 }
 
-fn sample_light(light: &Light, hit_point: &Vector3<f32>) -> LightSample {
-    let to_light = light.position - hit_point;
-    let distance = to_light.magnitude();
-    let direction = to_light / distance;
-    LightSample {
-        direction,
-        distance,
-        intensity: light.intensity,
-        pdf: 1.0,
+// Sample a light source (either point or area) given a hit point.
+fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> LightSample {
+    match light {
+        Light::Point {
+            position,
+            intensity,
+        } => {
+            let to_light = *position - *hit_point;
+            let distance = to_light.magnitude();
+            let direction = to_light / distance;
+            LightSample {
+                direction,
+                distance,
+                intensity: *intensity,
+                pdf: 1.0,
+            }
+        }
+        Light::Area {
+            center,
+            normal,
+            half_width,
+            half_height,
+            intensity,
+        } => {
+            // Build an orthonormal basis for the area light.
+            let arbitrary = if normal.x.abs() > 0.9 {
+                Vector3::new(0.0, 1.0, 0.0)
+            } else {
+                Vector3::new(1.0, 0.0, 0.0)
+            };
+            let tangent = normal.cross(&arbitrary).normalize();
+            let bitangent = tangent.cross(normal).normalize();
+            let u: f32 = rng.gen_range(-*half_width..*half_width);
+            let v: f32 = rng.gen_range(-*half_height..*half_height);
+            let sample_point = *center + tangent * u + bitangent * v;
+            let to_light = sample_point - *hit_point;
+            let distance = to_light.magnitude();
+            let direction = to_light / distance;
+            let cos_theta = normal.dot(&(-direction)).max(0.0);
+            let area = 4.0 * half_width * half_height;
+            // The effective radiant intensity from an area light is Lₑ * area.
+            LightSample {
+                direction,
+                distance,
+                intensity: *intensity * area,
+                pdf: 1.0 / area,
+            }
+        }
     }
 }
 
-// Average direct samples for a single light.
+// -------------------------
+// Direct Illumination
+// -------------------------
+// We average a few samples per light and then sum contributions.
 fn direct_light(
     hit: &HitRecord,
     light: &Light,
@@ -380,7 +429,7 @@ fn direct_light(
     let num_samples = 2;
     let mut sum = Vector3::zeros();
     for _ in 0..num_samples {
-        let ls = sample_light(light, &hit.point);
+        let ls = sample_light(light, &hit.point, rng);
         let epsilon = 0.001;
         let shadow_origin = hit.point + hit.normal * epsilon;
         let shadow_ray = Ray {
@@ -393,10 +442,10 @@ fn direct_light(
         }
     }
     sum /= num_samples as f32;
+    // For Lambertian surfaces: reflected radiance = albedo/π * irradiance.
     hit.color.component_mul(&sum) / std::f32::consts::PI
 }
 
-// Sum contributions from all lights.
 fn direct_light_all(
     hit: &HitRecord,
     lights: &[Light],
@@ -414,6 +463,9 @@ fn in_shadow(ray: &Ray, t_max: f32, world: &dyn Hittable) -> bool {
     world.hit(ray, 0.001, t_max).is_some()
 }
 
+// -------------------------
+// Cosine-weighted Hemisphere Sampling
+// -------------------------
 fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) -> Vector3<f32> {
     let r1: f32 = rng.gen();
     let r2: f32 = rng.gen();
@@ -433,6 +485,9 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
     u * x + v * y + w * z
 }
 
+// -------------------------
+// Radiance (Recursive Path Tracing)
+// -------------------------
 fn radiance(
     ray: &Ray,
     world: &dyn Hittable,
@@ -472,9 +527,8 @@ fn radiance(
 fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
 
-    // Create floor quad via our new helper.
+    // Floor quad: centered at (0,0,-2.5), normal upward, half-size 2.
     let floor_color = Vector3::new(0.9, 0.9, 0.9);
-    // Floor center at (0,0,-2.5) with normal upward.
     let floor_center = Vector3::new(0.0, 0.0, -2.5);
     let floor_normal = Vector3::new(0.0, 1.0, 0.0);
     objects.extend(quad_from_center(
@@ -484,9 +538,8 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
         floor_color,
     ));
 
-    // Create back wall quad via our helper.
+    // Back wall quad: centered at (0,1,-5), normal pointing toward the camera (0,0,1), half-size 2.
     let wall_color = Vector3::new(0.9, 0.9, 0.9);
-    // Back wall centered at (0,1,-5) with normal pointing toward the camera (0,0,1)
     let wall_center = Vector3::new(0.0, 1.0, -5.0);
     let wall_normal = Vector3::new(0.0, 0.0, 1.0);
     objects.extend(quad_from_center(wall_center, wall_normal, 2.0, wall_color));
@@ -503,7 +556,7 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
 }
 
 // -------------------------
-// Main: Build scene, BVH, and render
+// Main
 // -------------------------
 fn main() {
     let width = 800;
@@ -513,23 +566,31 @@ fn main() {
     let objects = reference_scene();
     let world = BVHNode::new(objects);
 
-    // Create four lights of varying colors.
+    // Define a collection of lights.
     let lights = vec![
-        Light {
+        Light::Point {
             position: Vector3::new(1.5, 1.5, -0.5),
-            intensity: Vector3::new(50.0, 50.0, 50.0), // white
+            intensity: Vector3::new(5.0, 5.0, 5.0), // white point light
         },
-        Light {
+        Light::Point {
             position: Vector3::new(-1.5, 1.5, -0.5),
-            intensity: Vector3::new(50.0, 10.0, 10.0), // reddish
+            intensity: Vector3::new(5.0, 1.0, 1.0), // reddish point light
         },
-        Light {
+        Light::Point {
             position: Vector3::new(0.0, 1.5, 0.5),
-            intensity: Vector3::new(10.0, 50.0, 10.0), // greenish
+            intensity: Vector3::new(1.0, 5.0, 1.0), // greenish point light
         },
-        Light {
+        Light::Point {
             position: Vector3::new(1.5, 2.5, -1.5),
-            intensity: Vector3::new(10.0, 10.0, 50.0), // bluish
+            intensity: Vector3::new(1.0, 1.0, 5.0), // bluish point light
+        },
+        // Add an area light.
+        Light::Area {
+            center: Vector3::new(0.0, 2.0, -2.0),
+            normal: Vector3::new(0.0, -1.0, 0.0), // facing downward
+            half_width: 0.5,
+            half_height: 0.5,
+            intensity: Vector3::new(10.0, 10.0, 10.0), // radiance Lₑ in W/(m²·sr)
         },
     ];
 
