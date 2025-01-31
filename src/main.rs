@@ -160,7 +160,7 @@ impl Hittable for Triangle {
         let h = ray.direction.cross(&edge2);
         let a = edge1.dot(&h);
         if a.abs() < epsilon {
-            return None; // Ray is parallel to triangle.
+            return None;
         }
         let f = 1.0 / a;
         let s = ray.origin - self.v0;
@@ -211,7 +211,6 @@ struct BVHNode {
     bbox: AABB,
 }
 
-// Custom Debug impl that prints only the bounding box.
 impl fmt::Debug for BVHNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BVHNode").field("bbox", &self.bbox).finish()
@@ -220,7 +219,6 @@ impl fmt::Debug for BVHNode {
 
 impl BVHNode {
     fn new(mut objects: Vec<Box<dyn Hittable>>) -> Self {
-        // Choose a random axis (0 = x, 1 = y, 2 = z)
         let axis = rand::random::<usize>() % 3;
         objects.sort_by(|a, b| {
             let box_a = a.bounding_box().expect("No bounding box");
@@ -234,7 +232,6 @@ impl BVHNode {
         if n == 1 {
             let object = objects.remove(0);
             let bbox = object.bounding_box().expect("No bounding box");
-            // Duplicate the object for both children.
             BVHNode {
                 left: object.clone_box(),
                 right: object,
@@ -349,6 +346,7 @@ fn in_shadow(ray: &Ray, t_max: f32, world: &dyn Hittable) -> bool {
     world.hit(ray, 0.001, t_max).is_some()
 }
 
+// Direct illumination using next-event estimation via reservoir sampling.
 fn shade(hit: &HitRecord, light: &Light, world: &dyn Hittable, rng: &mut impl Rng) -> Vector3<f32> {
     let num_candidates = 16;
     let mut reservoir = Reservoir::<LightSample>::new();
@@ -381,25 +379,75 @@ fn shade(hit: &HitRecord, light: &Light, world: &dyn Hittable, rng: &mut impl Rn
         }
         let cos_theta = hit.normal.dot(&sample.direction).max(0.0);
         let contribution = sample.intensity * cos_theta / (sample.distance * sample.distance);
-        // Lambertian BRDF: reflectance/π
+        // Lambertian BRDF: albedo/π
         return hit.color.component_mul(&contribution) / std::f32::consts::PI;
     }
     Vector3::zeros()
 }
 
+// Cosine-weighted hemisphere sampling for indirect bounce.
+fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) -> Vector3<f32> {
+    let r1: f32 = rng.gen();
+    let r2: f32 = rng.gen();
+    let r = r1.sqrt();
+    let phi = 2.0 * std::f32::consts::PI * r2;
+    let x = r * phi.cos();
+    let y = r * phi.sin();
+    let z = (1.0 - r1).sqrt();
+    // Build an orthonormal basis from 'normal'
+    let w = *normal;
+    let a = if w.x.abs() > 0.9 {
+        Vector3::new(0.0, 1.0, 0.0)
+    } else {
+        Vector3::new(1.0, 0.0, 0.0)
+    };
+    let v = w.cross(&a).normalize();
+    let u = w.cross(&v);
+    u * x + v * y + w * z
+}
+
+// Recursive radiance function with multiple bounces (depth 3).
+fn radiance(
+    ray: &Ray,
+    world: &dyn Hittable,
+    light: &Light,
+    rng: &mut impl Rng,
+    depth: u32,
+) -> Vector3<f32> {
+    if depth == 0 {
+        return Vector3::zeros();
+    }
+    if let Some(hit) = world.hit(ray, 0.001, std::f32::MAX) {
+        // Direct illumination via next-event estimation.
+        let direct = shade(&hit, light, world, rng);
+        // Indirect bounce: sample new direction using cosine-weighted hemisphere.
+        let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
+        let new_origin = hit.point + hit.normal * 0.001;
+        let indirect = radiance(
+            &Ray {
+                origin: new_origin,
+                direction: new_dir,
+            },
+            world,
+            light,
+            rng,
+            depth - 1,
+        );
+        // For Lambertian surfaces the Monte Carlo estimator gives indirect = albedo * L_indirect.
+        return direct + hit.color.component_mul(&indirect);
+    } else {
+        // Background radiance (ambient).
+        return Vector3::new(0.02, 0.02, 0.02);
+    }
+}
+
 // -------------------------
 // Reference Scene (Physically Realistic)
 // -------------------------
-// All dimensions are in meters and light intensity in W/sr.
-// This scene consists of:
-//  • A floor (two triangles)
-//  • A back wall (two triangles)
-//  • A diffuse sphere (object)
-//  • A point light located above the sphere.
 fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
 
-    // Floor: a rectangle from (-2,0,-5) to (2,0,0)
+    // Floor: rectangle from (-2,0,-5) to (2,0,0) split into two triangles.
     let floor_color = Vector3::new(0.9, 0.9, 0.9);
     objects.push(Box::new(Triangle {
         v0: Vector3::new(-2.0, 0.0, -5.0),
@@ -414,7 +462,7 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
         color: floor_color,
     }));
 
-    // Back wall: vertical plane at z = -5, from (-2,0,-5) to (2,2,-5)
+    // Back wall: vertical plane at z = -5 (from (-2,0,-5) to (2,2,-5)).
     let wall_color = Vector3::new(0.9, 0.9, 0.9);
     objects.push(Box::new(Triangle {
         v0: Vector3::new(-2.0, 0.0, -5.0),
@@ -429,8 +477,8 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
         color: wall_color,
     }));
 
-    // Diffuse sphere: center (0,0.5,-3) with radius 0.5
-    let sphere_color = Vector3::new(0.8, 0.2, 0.2); // red-ish
+    // Diffuse sphere: center (0,0.5,-3) with radius 0.5.
+    let sphere_color = Vector3::new(0.8, 0.2, 0.2);
     objects.push(Box::new(Sphere {
         center: Vector3::new(0.0, 0.5, -3.0),
         radius: 0.5,
@@ -448,19 +496,17 @@ fn main() {
     let height = 600;
     let mut img = RgbImage::new(width, height);
 
-    // Use the reference scene with physically realistic geometry.
+    // Use the reference scene.
     let objects = reference_scene();
     let world = BVHNode::new(objects);
 
-    // Define a point light.
-    // In physical units: position in meters, intensity in W/sr.
+    // Define a point light (physical units: meters, W/sr).
     let light = Light {
         position: Vector3::new(0.0, 1.8, -3.0),
-        intensity: Vector3::new(500.0, 500.0, 500.0), // e.g., a 500 W/sr source
+        intensity: Vector3::new(500.0, 500.0, 500.0),
     };
 
     // Camera parameters.
-    // Place camera so that it sees the reference scene.
     let camera_pos = Vector3::new(0.0, 1.0, 1.0);
     let fov_deg: f32 = 45.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
@@ -468,34 +514,25 @@ fn main() {
 
     let mut rng = StdRng::from_entropy();
     let samples_per_pixel = 16;
+    let max_depth = 3;
 
     // Render loop.
     for j in 0..height {
         for i in 0..width {
             let mut pixel_color = Vector3::zeros();
             for _ in 0..samples_per_pixel {
-                // Jitter for anti-aliasing.
                 let u = (i as f32 + rng.gen::<f32>()) / width as f32;
                 let v = (j as f32 + rng.gen::<f32>()) / height as f32;
                 let x = (2.0 * u - 1.0) * aspect_ratio * scale;
                 let y = (1.0 - 2.0 * v) * scale;
-                // Compute ray direction in camera space.
-                // Here we assume a simple pinhole camera looking toward -z.
                 let ray_dir = Vector3::new(x, y, -1.0).normalize();
                 let ray = Ray {
                     origin: camera_pos,
                     direction: ray_dir,
                 };
-                if let Some(hit) = world.hit(&ray, 0.001, std::f32::MAX) {
-                    let sample_color = shade(&hit, &light, &world, &mut rng);
-                    pixel_color += sample_color;
-                } else {
-                    // Background: use a low-level ambient radiance.
-                    pixel_color += Vector3::new(0.02, 0.02, 0.02);
-                }
+                pixel_color += radiance(&ray, &world, &light, &mut rng, max_depth);
             }
             pixel_color /= samples_per_pixel as f32;
-            // Gamma correction.
             let gamma = 2.2;
             let r = pixel_color.x.max(0.0).min(1.0).powf(1.0 / gamma);
             let g = pixel_color.y.max(0.0).min(1.0).powf(1.0 / gamma);
