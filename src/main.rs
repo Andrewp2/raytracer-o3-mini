@@ -600,8 +600,8 @@ fn main() {
     let aspect_ratio = width as f32 / height as f32;
 
     let mut rng = StdRng::from_entropy();
-    let samples_per_pixel = 16;
-    let max_depth = 3;
+    let samples_per_pixel = 256;
+    let max_depth = 5;
 
     for j in 0..height {
         for i in 0..width {
