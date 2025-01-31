@@ -221,7 +221,7 @@ fn quad(
     vec![
         Box::new(Triangle { v0, v1, v2, color }),
         Box::new(Triangle {
-            v0: v0,
+            v0,
             v1: v2,
             v2: v3,
             color,
@@ -345,7 +345,6 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>) -> LightSample {
     }
 }
 
-// Instead of reservoir sampling, we average multiple direct-light samples.
 fn direct_light(
     hit: &HitRecord,
     light: &Light,
@@ -368,7 +367,6 @@ fn direct_light(
         }
     }
     sum /= num_samples as f32;
-    // Lambertian: reflected radiance = (albedo/π) * irradiance.
     hit.color.component_mul(&sum) / std::f32::consts::PI
 }
 
@@ -376,7 +374,6 @@ fn in_shadow(ray: &Ray, t_max: f32, world: &dyn Hittable) -> bool {
     world.hit(ray, 0.001, t_max).is_some()
 }
 
-// Cosine-weighted hemisphere sampling for indirect bounces.
 fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) -> Vector3<f32> {
     let r1: f32 = rng.gen();
     let r2: f32 = rng.gen();
@@ -385,7 +382,6 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
     let x = r * phi.cos();
     let y = r * phi.sin();
     let z = (1.0 - r1).sqrt();
-    // Build an orthonormal basis around 'normal'
     let w = *normal;
     let a = if w.x.abs() > 0.9 {
         Vector3::new(0.0, 1.0, 0.0)
@@ -397,7 +393,6 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
     u * x + v * y + w * z
 }
 
-// Recursive radiance function with multiple bounces.
 fn radiance(
     ray: &Ray,
     world: &dyn Hittable,
@@ -410,7 +405,6 @@ fn radiance(
     }
     if let Some(hit) = world.hit(ray, 0.001, std::f32::MAX) {
         if DEBUG_NORMALS {
-            // Visualize normals: map from [-1,1] to [0,1]
             return (hit.normal + Vector3::new(1.0, 1.0, 1.0)) * 0.5;
         }
         let direct = direct_light(&hit, light, world, rng);
@@ -439,7 +433,6 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let mut objects: Vec<Box<dyn Hittable>> = Vec::new();
 
     // Create floor quad.
-    // We choose vertices such that the normal (computed via cross product) points upward.
     let floor_color = Vector3::new(0.9, 0.9, 0.9);
     let floor_v0 = Vector3::new(-2.0, 0.0, -5.0);
     let floor_v1 = Vector3::new(-2.0, 0.0, 0.0);
@@ -448,15 +441,13 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
     objects.extend(quad(floor_v0, floor_v1, floor_v2, floor_v3, floor_color));
 
     // Create back wall quad.
-    // Order the vertices so the normal points toward the camera (i.e. positive z).
+    // Use the natural counterclockwise order so that the computed normal is (0,0,1).
     let wall_color = Vector3::new(0.9, 0.9, 0.9);
     let wall_v0 = Vector3::new(-2.0, 0.0, -5.0);
     let wall_v1 = Vector3::new(2.0, 0.0, -5.0);
     let wall_v2 = Vector3::new(2.0, 2.0, -5.0);
     let wall_v3 = Vector3::new(-2.0, 2.0, -5.0);
-    // Reverse the triangle order so that the normal comes out as (0,0,1)
-    // by swapping v1 and v2.
-    objects.extend(quad(wall_v0, wall_v2, wall_v1, wall_v3, wall_color));
+    objects.extend(quad(wall_v0, wall_v1, wall_v2, wall_v3, wall_color));
 
     // Diffuse sphere.
     let sphere_color = Vector3::new(0.8, 0.2, 0.2);
@@ -480,13 +471,11 @@ fn main() {
     let objects = reference_scene();
     let world = BVHNode::new(objects);
 
-    // Use the modified light (moved off-axis).
     let light = Light {
         position: Vector3::new(1.5, 1.5, -0.5),
         intensity: Vector3::new(50.0, 50.0, 50.0),
     };
 
-    // Camera parameters.
     let camera_pos = Vector3::new(0.0, 1.0, 1.0);
     let fov_deg: f32 = 45.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
