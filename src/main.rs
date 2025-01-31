@@ -1,6 +1,7 @@
 use image::{Rgb, RgbImage};
 use nalgebra::Vector3;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::fmt;
 use std::mem;
@@ -207,12 +208,6 @@ impl Hittable for Triangle {
 // -------------------------
 // New quad helper: build a square quad from center, normal, half_size
 // -------------------------
-// This helper builds an orthonormal basis (T, B) from the given normal
-// and then defines corners as follows (counterclockwise when viewed from the front):
-//   v0 = center - T·half_size - B·half_size
-//   v1 = center - T·half_size + B·half_size
-//   v2 = center + T·half_size + B·half_size
-//   v3 = center + T·half_size - B·half_size
 fn quad_from_center(
     center: Vector3<f32>,
     normal: Vector3<f32>,
@@ -253,8 +248,8 @@ fn quad(
 }
 
 // -------------------------
-// Cube helper: build a cube from center and half_size
-// -------------------------
+// Cube helper: Build a cube from center and half_size.
+// Returns all six faces.
 fn cube_from_center(
     center: Vector3<f32>,
     half_size: f32,
@@ -289,14 +284,14 @@ fn cube_from_center(
         half_size,
         color,
     ));
-    // Ceiling: normal (0,-1,0) [pointing inward]
+    // Ceiling: normal (0,-1,0) pointing inward.
     faces.extend(quad_from_center(
         center + Vector3::new(0.0, half_size, 0.0),
         Vector3::new(0.0, -1.0, 0.0),
         half_size,
         color,
     ));
-    // Floor: normal (0,1,0) [pointing upward]
+    // Floor: normal (0,1,0) pointing upward.
     faces.extend(quad_from_center(
         center + Vector3::new(0.0, -half_size, 0.0),
         Vector3::new(0.0, 1.0, 0.0),
@@ -397,7 +392,7 @@ impl Hittable for BVHNode {
 // -------------------------
 // Light
 // -------------------------
-// Now we support two kinds of lights.
+// Supports two kinds of lights: Point and Area.
 enum Light {
     Point {
         position: Vector3<f32>,
@@ -408,7 +403,7 @@ enum Light {
         normal: Vector3<f32>,
         half_width: f32,
         half_height: f32,
-        intensity: Vector3<f32>, // radiance in W/(m^2·sr)
+        intensity: Vector3<f32>, // radiance in W/(m²·sr)
     },
 }
 
@@ -420,7 +415,7 @@ struct LightSample {
     pdf: f32,
 }
 
-// Sample a light source (point or area) at a hit point.
+// Sample a light (point or area) at a hit point.
 fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> LightSample {
     match light {
         Light::Point {
@@ -444,7 +439,6 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> 
             half_height,
             intensity,
         } => {
-            // Build an orthonormal basis for the area light.
             let arbitrary = if normal.x.abs() > 0.9 {
                 Vector3::new(0.0, 1.0, 0.0)
             } else {
@@ -458,9 +452,7 @@ fn sample_light(light: &Light, hit_point: &Vector3<f32>, rng: &mut impl Rng) -> 
             let to_light = sample_point - *hit_point;
             let distance = to_light.magnitude();
             let direction = to_light / distance;
-            let cos_theta = normal.dot(&(-direction)).max(0.0);
             let area = 4.0 * half_width * half_height;
-            // The effective radiant intensity is Lₑ * area.
             LightSample {
                 direction,
                 distance,
@@ -480,7 +472,7 @@ fn direct_light(
     world: &dyn Hittable,
     rng: &mut impl Rng,
 ) -> Vector3<f32> {
-    let num_samples = 2;
+    let num_samples = 6;
     let mut sum = Vector3::zeros();
     for _ in 0..num_samples {
         let ls = sample_light(light, &hit.point, rng);
@@ -539,7 +531,7 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
 }
 
 // -------------------------
-// Radiance (Recursive Path Tracing)
+// Radiance (Recursive Path Tracing) with Russian Roulette
 // -------------------------
 fn radiance(
     ray: &Ray,
@@ -555,77 +547,52 @@ fn radiance(
         if DEBUG_NORMALS {
             return (hit.normal + Vector3::new(1.0, 1.0, 1.0)) * 0.5;
         }
+        // Compute direct illumination.
         let direct = direct_light_all(&hit, lights, world, rng);
-        let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
-        let new_origin = hit.point + hit.normal * 0.001;
-        let indirect = radiance(
-            &Ray {
-                origin: new_origin,
-                direction: new_dir,
-            },
-            world,
-            lights,
-            rng,
-            depth - 1,
-        );
+
+        // Russian roulette for indirect bounce.
+        let mut indirect = Vector3::zeros();
+        let min_depth = 3;
+        if depth > min_depth {
+            let rr_prob = hit
+                .color
+                .x
+                .max(hit.color.y)
+                .max(hit.color.z)
+                .min(1.0)
+                .max(0.1);
+            if rng.gen::<f32>() < rr_prob {
+                let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
+                let new_origin = hit.point + hit.normal * 0.001;
+                indirect = radiance(
+                    &Ray {
+                        origin: new_origin,
+                        direction: new_dir,
+                    },
+                    world,
+                    lights,
+                    rng,
+                    depth - 1,
+                ) / rr_prob;
+            }
+        } else {
+            let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
+            let new_origin = hit.point + hit.normal * 0.001;
+            indirect = radiance(
+                &Ray {
+                    origin: new_origin,
+                    direction: new_dir,
+                },
+                world,
+                lights,
+                rng,
+                depth - 1,
+            );
+        }
         return direct + hit.color.component_mul(&indirect);
     } else {
         return Vector3::new(0.02, 0.02, 0.02);
     }
-}
-
-// -------------------------
-// Cube helper: Build a cube from center and half_size.
-// Returns all six faces as separate Hittable objects.
-fn cube_from_center_2(
-    center: Vector3<f32>,
-    half_size: f32,
-    color: Vector3<f32>,
-) -> Vec<Box<dyn Hittable>> {
-    let mut faces = Vec::new();
-    // Front face: normal (0,0,1)
-    faces.extend(quad_from_center(
-        center + Vector3::new(0.0, 0.0, half_size),
-        Vector3::new(0.0, 0.0, 1.0),
-        half_size,
-        color,
-    ));
-    // Back face: normal (0,0,-1)
-    faces.extend(quad_from_center(
-        center + Vector3::new(0.0, 0.0, -half_size),
-        Vector3::new(0.0, 0.0, -1.0),
-        half_size,
-        color,
-    ));
-    // Left face: normal (-1,0,0)
-    faces.extend(quad_from_center(
-        center + Vector3::new(-half_size, 0.0, 0.0),
-        Vector3::new(-1.0, 0.0, 0.0),
-        half_size,
-        color,
-    ));
-    // Right face: normal (1,0,0)
-    faces.extend(quad_from_center(
-        center + Vector3::new(half_size, 0.0, 0.0),
-        Vector3::new(1.0, 0.0, 0.0),
-        half_size,
-        color,
-    ));
-    // Ceiling: normal (0,-1,0) pointing inward.
-    faces.extend(quad_from_center(
-        center + Vector3::new(0.0, half_size, 0.0),
-        Vector3::new(0.0, -1.0, 0.0),
-        half_size,
-        color,
-    ));
-    // Floor: normal (0,1,0) pointing upward.
-    faces.extend(quad_from_center(
-        center + Vector3::new(0.0, -half_size, 0.0),
-        Vector3::new(0.0, 1.0, 0.0),
-        half_size,
-        color,
-    ));
-    faces
 }
 
 // -------------------------
@@ -674,8 +641,8 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
         Vector3::new(0.1, 0.8, 0.1),
     ));
 
-    // Optionally, add a cube inside the box.
-    // Let's add a cube of side length 0.6 (half_size = 0.3) at center (0.3, 0.3, -2.3), colored white.
+    // Add a cube inside the box.
+    // Cube of side length 0.6 (half_size = 0.3) at center (0.3, 0.3, -2.3), colored white.
     objects.extend(cube_from_center(
         Vector3::new(0.3, 0.3, -2.3),
         0.3,
@@ -686,30 +653,37 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
 }
 
 // -------------------------
-// Main: Build scene, BVH, and render
+// Main: Build scene, BVH, and render (with Rayon multi-threading)
 // -------------------------
 fn main() {
     let width = 800;
     let height = 600;
-    let mut img = RgbImage::new(width, height);
 
+    // Prepare the scene.
     let objects = reference_scene();
     let world = BVHNode::new(objects);
 
-    // Define a collection of lights.
-    // We include several point lights and one area light.
+    // Define lights:
+    // Existing point light and area light, plus two additional point lights of different colors.
     let lights = vec![
         Light::Point {
             position: Vector3::new(0.0, 1.8, 0.0),
-            intensity: Vector3::new(5.0, 5.0, 5.0),
+            intensity: Vector3::new(2.0, 2.0, 2.0),
         },
-        // An area light on the ceiling:
         Light::Area {
             center: Vector3::new(0.0, 1.99, -2.0),
             normal: Vector3::new(0.0, -1.0, 0.0),
-            half_width: 0.4,
+            half_width: 0.2,
             half_height: 0.4,
-            intensity: Vector3::new(10.0, 10.0, 10.0),
+            intensity: Vector3::new(2.0, 2.0, 2.0),
+        },
+        Light::Point {
+            position: Vector3::new(-0.5, 1.5, -1.5),
+            intensity: Vector3::new(1.0, 0.3, 0.3),
+        },
+        Light::Point {
+            position: Vector3::new(0.5, 1.5, -1.5),
+            intensity: Vector3::new(0.3, 0.3, 1.0),
         },
     ];
 
@@ -718,37 +692,40 @@ fn main() {
     let scale = (fov_deg.to_radians() * 0.5).tan();
     let aspect_ratio = width as f32 / height as f32;
 
-    let mut rng = StdRng::from_entropy();
-    let samples_per_pixel = 16;
-    let max_depth = 5;
+    let num_samples_per_pixel = 256;
+    let num_bounces = 5;
 
-    for j in 0..height {
-        for i in 0..width {
-            let mut pixel_color = Vector3::zeros();
-            for _ in 0..samples_per_pixel {
-                let u = (i as f32 + rng.gen::<f32>()) / width as f32;
-                let v = (j as f32 + rng.gen::<f32>()) / height as f32;
-                let x = (2.0 * u - 1.0) * aspect_ratio * scale;
-                let y = (1.0 - 2.0 * v) * scale;
-                let ray_dir = Vector3::new(x, y, -1.0).normalize();
-                let ray = Ray {
-                    origin: camera_pos,
-                    direction: ray_dir,
-                };
-                pixel_color += radiance(&ray, &world, &lights, &mut rng, max_depth);
-            }
-            pixel_color /= samples_per_pixel as f32;
-            let gamma = 2.2;
-            let r = pixel_color.x.max(0.0).min(1.0).powf(1.0 / gamma);
-            let g = pixel_color.y.max(0.0).min(1.0).powf(1.0 / gamma);
-            let b = pixel_color.z.max(0.0).min(1.0).powf(1.0 / gamma);
-            img.put_pixel(
-                i,
-                j,
-                Rgb([(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]),
-            );
-        }
-    }
+    let pixel_data: Vec<u8> = (0..(width * height))
+        .into_par_iter()
+        .map_init(
+            || StdRng::from_entropy(),
+            |rng, idx| {
+                let i = idx % width;
+                let j = idx / width;
+                let mut pixel_color = Vector3::zeros();
+                for _ in 0..num_samples_per_pixel {
+                    let u = (i as f32 + rng.gen::<f32>()) / width as f32;
+                    let v = (j as f32 + rng.gen::<f32>()) / height as f32;
+                    let x = (2.0 * u - 1.0) * aspect_ratio * scale;
+                    let y = (1.0 - 2.0 * v) * scale;
+                    let ray_dir = Vector3::new(x, y, -1.0).normalize();
+                    let ray = Ray {
+                        origin: camera_pos,
+                        direction: ray_dir,
+                    };
+                    pixel_color += radiance(&ray, &world, &lights, rng, num_bounces);
+                }
+                pixel_color /= num_samples_per_pixel as f32;
+                let gamma = 2.2;
+                let r = pixel_color.x.max(0.0).min(1.0).powf(1.0 / gamma);
+                let g = pixel_color.y.max(0.0).min(1.0).powf(1.0 / gamma);
+                let b = pixel_color.z.max(0.0).min(1.0).powf(1.0 / gamma);
+                vec![(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
+            },
+        )
+        .flatten()
+        .collect();
 
+    let img = RgbImage::from_raw(width as u32, height as u32, pixel_data).unwrap();
     img.save("output.png").unwrap();
 }
