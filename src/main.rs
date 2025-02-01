@@ -8,9 +8,9 @@ use std::mem;
 
 const DEBUG_NORMALS: bool = false;
 const CUBE_ROTATION_DEGREES: f32 = 20.0;
-const CLAMP_RADIANCE: f32 = 5.0; // Clamp each radiance sample to this maximum value
+const CLAMP_RADIANCE: f32 = 5.0; // Clamp radiance to reduce fireflies
 
-// Helper functions to convert a point or vector into a homogeneous Vector4.
+// Helper functions for homogeneous coordinates.
 fn point_to_vec4(p: &Vector3<f32>) -> Vector4<f32> {
     Vector4::new(p.x, p.y, p.z, 1.0)
 }
@@ -18,7 +18,7 @@ fn vector_to_vec4(v: &Vector3<f32>) -> Vector4<f32> {
     Vector4::new(v.x, v.y, v.z, 0.0)
 }
 
-// A simple clamping function to reduce fireflies.
+// A simple clamping function.
 fn clamp_radiance(color: Vector3<f32>, max_val: f32) -> Vector3<f32> {
     Vector3::new(
         color.x.min(max_val),
@@ -300,7 +300,7 @@ fn cube_from_origin(half_size: f32, color: Vector3<f32>) -> Vec<Box<dyn Hittable
     // Ceiling: normal (0,-1,0) [points inward]
     faces.extend(quad_from_center(
         Vector3::new(0.0, half_size, 0.0),
-        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
         half_size,
         color,
     ));
@@ -623,7 +623,7 @@ fn cosine_weighted_sample_hemisphere(normal: &Vector3<f32>, rng: &mut impl Rng) 
 }
 
 // -------------------------
-// Radiance (Recursive Path Tracing) with Russian Roulette
+// Radiance with Next Event Estimation and MIS
 // -------------------------
 fn radiance(
     ray: &Ray,
@@ -639,46 +639,28 @@ fn radiance(
         if DEBUG_NORMALS {
             return (hit.normal + Vector3::new(1.0, 1.0, 1.0)) * 0.5;
         }
-        let direct = direct_light_all(&hit, lights, world, rng);
-        let mut indirect = Vector3::zeros();
-        let min_depth = 3;
-        if depth > min_depth {
-            let rr_prob = hit
-                .color
-                .x
-                .max(hit.color.y)
-                .max(hit.color.z)
-                .min(1.0)
-                .max(0.1);
-            if rng.gen::<f32>() < rr_prob {
-                let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
-                let new_origin = hit.point + hit.normal * 0.001;
-                indirect = radiance(
-                    &Ray {
-                        origin: new_origin,
-                        direction: new_dir,
-                    },
-                    world,
-                    lights,
-                    rng,
-                    depth - 1,
-                ) / rr_prob;
-            }
-        } else {
-            let new_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
-            let new_origin = hit.point + hit.normal * 0.001;
-            indirect = radiance(
-                &Ray {
-                    origin: new_origin,
-                    direction: new_dir,
-                },
-                world,
-                lights,
-                rng,
-                depth - 1,
-            );
-        }
-        direct + hit.color.component_mul(&indirect)
+        // Next event estimation: sample the lights directly.
+        let l_direct = direct_light_all(&hit, lights, world, rng);
+        // BSDF sampling: sample the hemisphere.
+        let bsdf_dir = cosine_weighted_sample_hemisphere(&hit.normal, rng);
+        // The cosine-weighted hemisphere pdf is: pdf = cos(theta)/pi.
+        let bsdf_pdf = hit.normal.dot(&bsdf_dir).max(0.0) / std::f32::consts::PI;
+        let new_origin = hit.point + hit.normal * 0.001;
+        let l_bsdf = radiance(
+            &Ray {
+                origin: new_origin,
+                direction: bsdf_dir,
+            },
+            world,
+            lights,
+            rng,
+            depth - 1,
+        );
+        // MIS weight for the BSDF sample (assume light sampling pdf ~ 1).
+        let weight_bsdf = bsdf_pdf / (bsdf_pdf + 1.0);
+        let l_indirect = hit.color.component_mul(&(weight_bsdf * l_bsdf));
+        // Combine direct and indirect contributions.
+        clamp_radiance(l_direct + l_indirect, CLAMP_RADIANCE)
     } else {
         Vector3::new(0.02, 0.02, 0.02)
     }
@@ -733,7 +715,7 @@ fn reference_scene() -> Vec<Box<dyn Hittable>> {
     let translation = Matrix4::new_translation(&Vector3::new(0.3, 0.3, -2.3));
     // Compose: rotate first, then translate.
     let transform = translation * rotation;
-    // Wrap each face in a Transform so that the cube rotates about its own center and is moved.
+    // Wrap each face in a Transform.
     let transformed_cube: Vec<Box<dyn Hittable>> = cube_faces
         .into_iter()
         .map(|h| Box::new(Transform::new(h, transform)) as Box<dyn Hittable>)
@@ -751,32 +733,32 @@ fn main() {
     let objects = reference_scene();
     let world = BVHNode::new(objects);
     let lights = vec![
-        Light::Point {
-            position: Vector3::new(0.0, 1.8, 0.0),
-            intensity: Vector3::new(2.0, 2.0, 2.0),
-        },
+        // Light::Point {
+        //     position: Vector3::new(0.0, 1.8, 0.0),
+        //     intensity: Vector3::new(2.0, 2.0, 2.0),
+        // },
         Light::Area {
-            center: Vector3::new(0.0, 1.99, -2.0),
+            center: Vector3::new(0.0, 1.95, -2.0),
             normal: Vector3::new(0.0, -1.0, 0.0),
             half_width: 0.2,
             half_height: 0.4,
-            intensity: Vector3::new(2.0, 2.0, 2.0),
+            intensity: Vector3::new(4.0, 4.0, 4.0),
         },
-        Light::Point {
-            position: Vector3::new(-0.5, 1.5, -1.5),
-            intensity: Vector3::new(1.0, 0.3, 0.3),
-        },
-        Light::Point {
-            position: Vector3::new(0.5, 1.5, -1.5),
-            intensity: Vector3::new(0.3, 0.3, 1.0),
-        },
+        // Light::Point {
+        //     position: Vector3::new(-0.5, 1.5, -1.5),
+        //     intensity: Vector3::new(1.0, 0.3, 0.3),
+        // },
+        // Light::Point {
+        //     position: Vector3::new(0.5, 1.5, -1.5),
+        //     intensity: Vector3::new(0.3, 0.3, 1.0),
+        // },
     ];
     let camera_pos = Vector3::new(0.0, 1.0, 2.0);
     let fov_deg: f32 = 40.0;
     let scale = (fov_deg.to_radians() * 0.5).tan();
     let aspect_ratio = width as f32 / height as f32;
     let num_samples_per_pixel = 128;
-    let num_bounces = 4;
+    let num_bounces = 6;
     let pixel_data: Vec<u8> = (0..(width * height))
         .into_par_iter()
         .map_init(
@@ -795,7 +777,7 @@ fn main() {
                         origin: camera_pos,
                         direction: ray_dir,
                     };
-                    // Clamp each radiance sample to reduce fireflies.
+                    // Use our modified radiance function with next event estimation.
                     let sample = radiance(&ray, &world, &lights, rng, num_bounces);
                     pixel_color += clamp_radiance(sample, CLAMP_RADIANCE);
                 }
